@@ -157,11 +157,14 @@ func (k ecdsaPublicKey) Thumbprint(hash crypto.Hash) ([]byte, error) {
 	if err := k.Raw(&key); err != nil {
 		return nil, errors.Wrap(err, `failed to materialize ecdsa.PublicKey for thumbprint generation`)
 	}
+
+	curveSize := curveSize(key.Curve)
+
 	return ecdsaThumbprint(
 		hash,
 		key.Curve.Params().Name,
-		base64.EncodeToString(key.X.Bytes()),
-		base64.EncodeToString(key.Y.Bytes()),
+		base64.EncodeToString(newFixedSizeBuffer(key.X.Bytes(), curveSize)),
+		base64.EncodeToString(newFixedSizeBuffer(key.Y.Bytes(), curveSize)),
 	), nil
 }
 
@@ -178,4 +181,26 @@ func (k ecdsaPrivateKey) Thumbprint(hash crypto.Hash) ([]byte, error) {
 		base64.EncodeToString(key.X.Bytes()),
 		base64.EncodeToString(key.Y.Bytes()),
 	), nil
+}
+
+// Get size of curve in bytes
+func curveSize(crv elliptic.Curve) int {
+	bits := crv.Params().BitSize
+
+	div := bits / 8
+	mod := bits % 8
+
+	if mod == 0 {
+		return div
+	}
+
+	return div + 1
+}
+
+func newFixedSizeBuffer(data []byte, length int) []byte {
+	if len(data) > length {
+		panic("square/go-jose: invalid call to newFixedSizeBuffer (len(data) > length)")
+	}
+	pad := make([]byte, length-len(data))
+	return append(pad, data...)
 }
