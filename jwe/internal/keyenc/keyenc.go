@@ -153,6 +153,7 @@ func (kw ECDHESDecrypt) Decrypt(enckey []byte) ([]byte, error) {
 	binary.BigEndian.PutUint32(pubinfo, keysize*8)
 
 	z, _ := privkey.PublicKey.Curve.ScalarMult(pubkey.X, pubkey.Y, privkey.D.Bytes())
+	// TODO: `jose` library uses 'enc' (content encryption) algo here instead of kw.algorithm
 	kdf := concatkdf.New(crypto.SHA256, []byte(kw.algorithm.String()), z.Bytes(), kw.apu, kw.apv, pubinfo, []byte{})
 	kek := make([]byte, keysize)
 	if _, err := kdf.Read(kek); err != nil {
@@ -165,6 +166,58 @@ func (kw ECDHESDecrypt) Decrypt(enckey []byte) ([]byte, error) {
 	}
 
 	return Unwrap(block, enckey)
+}
+
+// NewECMRDecrypt creates a new key decrypter using ECMR
+func NewECMRDecrypt(alg jwa.KeyEncryptionAlgorithm, enc jwa.ContentEncryptionAlgorithm, pubkey *ecdsa.PublicKey, apu, apv []byte) *ECMRDecrypt {
+	return &ECMRDecrypt{
+		algorithm: alg,
+		enc:       enc,
+		apu:       apu,
+		apv:       apv,
+		pubkey:    pubkey,
+	}
+}
+
+// Algorithm returns the key encryption algorithm being used
+func (kw ECMRDecrypt) Algorithm() jwa.KeyEncryptionAlgorithm {
+	return kw.algorithm
+}
+
+// Decrypt returns a key derived using ECMR algorithm. Despite the name it does not decrypt
+// but rather derive an encryption key from the provided public EC key.
+func (kw ECMRDecrypt) Decrypt(_ []byte) ([]byte, error) {
+	var keysize uint32
+	switch kw.enc {
+	case jwa.A128CBC_HS256, jwa.A128GCM:
+		keysize = 16
+	case jwa.A192CBC_HS384, jwa.A192GCM:
+		keysize = 24
+	case jwa.A256CBC_HS512, jwa.A256GCM:
+		keysize = 32
+	default:
+		return nil, errors.Errorf("invalid key wrap algorithm (%s)", kw.algorithm)
+	}
+
+	pubkey := kw.pubkey
+
+	pubinfo := make([]byte, 4)
+	binary.BigEndian.PutUint32(pubinfo, keysize*8)
+
+	z := pubkey.X.Bytes()
+	if len(z)*8 < pubkey.Params().BitSize {
+		p := pubkey.Params().BitSize - 8*len(z)
+		p = (p + 7) / 8
+		pad := make([]byte, p)
+		z = append(pad, z...)
+	}
+	kdf := concatkdf.New(crypto.SHA256, []byte(kw.enc.String()), z, kw.apu, kw.apv, pubinfo, []byte{})
+	kek := make([]byte, keysize)
+	if _, err := kdf.Read(kek); err != nil {
+		return nil, errors.Wrap(err, "failed to read kdf")
+	}
+
+	return kek, nil
 }
 
 // NewRSAOAEPEncrypt creates a new key encrypter using RSA OAEP

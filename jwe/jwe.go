@@ -6,8 +6,10 @@ package jwe
 import (
 	"bytes"
 	"crypto/ecdsa"
+	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"math/big"
 
 	"github.com/lestrrat-go/jwx/buffer"
 	"github.com/lestrrat-go/jwx/jwa"
@@ -311,7 +313,74 @@ func buildKeyDecrypter(alg jwa.KeyEncryptionAlgorithm, h Headers, key interface{
 		}
 
 		return keyenc.NewECDHESDecrypt(alg, pubkey.(*ecdsa.PublicKey), apuData, apvData, privkey), nil
+	case jwa.ECMR:
+		epkif, ok := h.Get(EphemeralPublicKeyKey)
+		if !ok {
+			return nil, errors.New("failed to get 'epk' field")
+		}
+		if epkif == nil {
+			return nil, errors.Errorf("'epk' header is required as the key to build %s key decrypter", alg)
+		}
+
+		epk, ok := epkif.(jwk.ECDSAPublicKey)
+		if !ok {
+			return nil, errors.Errorf("'epk' header is required as the key to build %s key decrypter", alg)
+		}
+
+		var epkKey ecdsa.PublicKey
+		if err := epk.Raw(&epkKey); err != nil {
+			return nil, errors.Wrap(err, "failed to get public ephemeral key")
+		}
+
+		ecCurve := epkKey.Curve // curve used for the key exchange
+
+		tempKey, err := ecdsa.GenerateKey(ecCurve, rand.Reader)
+		if err != nil {
+			return nil, err
+		}
+
+		x, y := ecCurve.Add(tempKey.X, tempKey.Y, epkKey.X, epkKey.Y)
+
+		xfrKey := ecdsa.PublicKey{Curve: ecCurve, X: x, Y: y}
+
+		exchFunc, ok := key.(ECMRExchangeFunc)
+		if !ok {
+			return nil, errors.Errorf("jwe.ECMRExchangeFunc is required as the key to build %s key decrypter", alg)
+		}
+		respKey, srvKey, err := exchFunc(&xfrKey)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to exchange public key")
+		}
+
+		if respKey.Curve != ecCurve {
+			return nil, errors.Errorf("expect EC curve type %v, got %v", ecCurve, respKey.Curve)
+		}
+
+		if !ecCurve.IsOnCurve(srvKey.X, srvKey.Y) {
+			return nil, errors.Errorf("server key is not on the curve %v", ecCurve)
+		}
+
+		x, y = ecCurve.ScalarMult(srvKey.X, srvKey.Y, tempKey.D.Bytes())
+
+		// resp - tmp
+		x, y = ecCurve.Add(respKey.X, respKey.Y, x, new(big.Int).Neg(y))
+		decryptKey := ecdsa.PublicKey{Curve: ecCurve, X: x, Y: y}
+
+		var apuData, apvData []byte
+		apu := h.AgreementPartyUInfo()
+		if apu.Len() > 0 {
+			apuData = apu.Bytes()
+		}
+
+		apv := h.AgreementPartyVInfo()
+		if apv.Len() > 0 {
+			apuData = apu.Bytes()
+		}
+
+		return keyenc.NewECMRDecrypt(alg, h.ContentEncryption(), &decryptKey, apuData, apvData), nil
 	}
 
 	return nil, errors.Errorf(`unsupported algorithm for key decryption (%s)`, alg)
 }
+
+type ECMRExchangeFunc func(xfrKey *ecdsa.PublicKey) (respKey *ecdsa.PublicKey, srvKey *ecdsa.PublicKey, err error)
