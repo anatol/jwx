@@ -63,3 +63,5 @@ type VisitorFunc = iter.MapVisitorFunc
 type HeaderPair = mapiter.Pair
 type Iterator = mapiter.Iterator
 type Option = option.Interface
+
+type ECMRExchangeFunc = keyenc.ECMRExchangeFunc

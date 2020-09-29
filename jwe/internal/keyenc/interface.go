@@ -49,6 +49,18 @@ type ECDHESDecrypt struct {
 	pubkey     *ecdsa.PublicKey
 }
 
+type ECMRExchangeFunc func(xfrKey *ecdsa.PublicKey) (respKey *ecdsa.PublicKey, srvKey *ecdsa.PublicKey, err error)
+
+// ECMRDecrypt decrypts keys using ECMR.
+type ECMRDecrypt struct {
+	keyalg     jwa.KeyEncryptionAlgorithm
+	contentalg jwa.ContentEncryptionAlgorithm
+	apu        []byte
+	apv        []byte
+	pubkey     *ecdsa.PublicKey
+	exchFn     ECMRExchangeFunc
+}
+
 // RSAOAEPEncrypt encrypts keys using RSA OAEP algorithm
 type RSAOAEPEncrypt struct {
 	alg    jwa.KeyEncryptionAlgorithm

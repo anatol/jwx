@@ -13,6 +13,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash"
+	"math/big"
 
 	"github.com/lestrrat-go/jwx/internal/concatkdf"
 	"github.com/lestrrat-go/jwx/internal/ecutil"
@@ -210,6 +211,120 @@ func (kw ECDHESDecrypt) Decrypt(enckey []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create cipher for ECDH-ES key wrap")
+	}
+
+	return Unwrap(block, enckey)
+}
+
+// NewECMRDecrypt creates a new key decrypter using ECMR
+func NewECMRDecrypt(keyalg jwa.KeyEncryptionAlgorithm, contentalg jwa.ContentEncryptionAlgorithm, pubkey *ecdsa.PublicKey, apu, apv []byte, exchFn ECMRExchangeFunc) *ECMRDecrypt {
+	return &ECMRDecrypt{
+		keyalg:     keyalg,
+		contentalg: contentalg,
+		apu:        apu,
+		apv:        apv,
+		exchFn:     exchFn,
+		pubkey:     pubkey,
+	}
+}
+
+// Algorithm returns the key encryption algorithm being used
+func (kw ECMRDecrypt) Algorithm() jwa.KeyEncryptionAlgorithm {
+	return kw.keyalg
+}
+
+func DeriveECMR(alg, apu, apv []byte, exchFn ECMRExchangeFunc, pubkey *ecdsa.PublicKey, keysize uint32) ([]byte, error) {
+	if pdebug.Enabled {
+		g := pdebug.Marker("DeriveECMR (keysize = %d)", keysize)
+		defer g.End()
+	}
+
+	pubinfo := make([]byte, 4)
+	binary.BigEndian.PutUint32(pubinfo, keysize*8)
+
+	ecCurve := pubkey.Curve // curve used for the key exchange
+
+	tempKey, err := ecdsa.GenerateKey(ecCurve, rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+
+	x, y := ecCurve.Add(tempKey.X, tempKey.Y, pubkey.X, pubkey.Y)
+
+	xfrKey := ecdsa.PublicKey{Curve: ecCurve, X: x, Y: y}
+
+	respKey, srvKey, err := exchFn(&xfrKey)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to exchange public key")
+	}
+
+	if respKey.Curve != ecCurve {
+		return nil, errors.Errorf("expect EC curve type %v, got %v", ecCurve, respKey.Curve)
+	}
+
+	if !ecCurve.IsOnCurve(srvKey.X, srvKey.Y) {
+		return nil, errors.Errorf("server key is not on the curve %v", ecCurve)
+	}
+
+	x, y = ecCurve.ScalarMult(srvKey.X, srvKey.Y, tempKey.D.Bytes())
+
+	// resp - tmp
+	z, _ := ecCurve.Add(respKey.X, respKey.Y, x, new(big.Int).Neg(y))
+	zBytes := ecutil.AllocECPointBuffer(z, ecCurve)
+	defer ecutil.ReleaseECPointBuffer(zBytes)
+
+	kdf := concatkdf.New(crypto.SHA256, alg, zBytes, apu, apv, pubinfo, []byte{})
+	key := make([]byte, keysize)
+	if _, err := kdf.Read(key); err != nil {
+		return nil, errors.Wrap(err, "failed to read kdf")
+	}
+
+	return key, nil
+}
+
+// Decrypt decrypts the encrypted key using ECMR
+func (kw ECMRDecrypt) Decrypt(enckey []byte) ([]byte, error) {
+	if pdebug.Enabled {
+		g := pdebug.Marker("keyenc.ECMRDecrypt.Decrypt")
+		defer g.End()
+	}
+
+	var algBytes []byte
+	var keysize uint32
+
+	// Use keyalg except for when jwa.ECMR
+	algBytes = []byte(kw.keyalg.String())
+
+	switch kw.keyalg {
+	case jwa.ECMR:
+		// Create a content cipher from the content encryption algorithm
+		c, err := contentcipher.NewAES(kw.contentalg)
+		if err != nil {
+			return nil, errors.Wrapf(err, `failed to create content cipher for %s`, kw.contentalg)
+		}
+		if pdebug.Enabled {
+			pdebug.Printf("Using keysize (%d) from content cipher %a", c.KeySize(), kw.contentalg)
+		}
+
+		keysize = uint32(c.KeySize())
+		algBytes = []byte(kw.contentalg.String())
+	default:
+		return nil, errors.Errorf("invalid ECMR key wrap algorithm (%s)", kw.keyalg)
+	}
+
+	key, err := DeriveECMR(algBytes, kw.apu, kw.apv, kw.exchFn, kw.pubkey, keysize)
+	if err != nil {
+		return nil, errors.Wrap(err, `failed to derive ECMR encryption key`)
+	}
+
+	// ECMR does not wrap keys
+	if kw.keyalg == jwa.ECMR {
+		return key, nil
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create cipher for ECMR key wrap")
 	}
 
 	return Unwrap(block, enckey)

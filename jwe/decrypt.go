@@ -83,6 +83,43 @@ func buildECDHESDecrypter(alg jwa.KeyEncryptionAlgorithm, h Headers, key interfa
 	return keyenc.NewECDHESDecrypt(alg, h.ContentEncryption(), pubkey.(*ecdsa.PublicKey), apuData, apvData, privkey), nil
 }
 
+func buildECMRDecrypter(alg jwa.KeyEncryptionAlgorithm, h Headers, key interface{}) (keyenc.Decrypter, error) {
+	epkif, ok := h.Get(EphemeralPublicKeyKey)
+	if !ok {
+		return nil, errors.New("failed to get 'epk' field")
+	}
+	if epkif == nil {
+		return nil, errors.Errorf("'epk' header is required as the key to build %s key decrypter", alg)
+	}
+
+	epk, ok := epkif.(jwk.ECDSAPublicKey)
+	if !ok {
+		return nil, errors.Errorf("'epk' header is required as the key to build %s key decrypter", alg)
+	}
+
+	var pubkey interface{}
+	if err := epk.Raw(&pubkey); err != nil {
+		return nil, errors.Wrap(err, "failed to get public key")
+	}
+
+	exchFn, ok := key.(keyenc.ECMRExchangeFunc)
+	if !ok {
+		return nil, errors.Errorf("*keyenc.ECMRExchangeFunc is required as the key to build %s key decrypter", alg)
+	}
+	var apuData, apvData []byte
+	apu := h.AgreementPartyUInfo()
+	if apu.Len() > 0 {
+		apuData = apu.Bytes()
+	}
+
+	apv := h.AgreementPartyVInfo()
+	if apv.Len() > 0 {
+		apuData = apu.Bytes()
+	}
+
+	return keyenc.NewECMRDecrypt(alg, h.ContentEncryption(), pubkey.(*ecdsa.PublicKey), apuData, apvData, exchFn), nil
+}
+
 // buildKeyDecrypter creates a new KeyDecrypter instance from the given
 // parameters. It is used by the Message.Decrypt method to create
 // key decrypter(s) from the given message. `keysize` is only used by
@@ -97,6 +134,8 @@ func buildKeyDecrypter(alg jwa.KeyEncryptionAlgorithm, h Headers, key interface{
 		return buildKeywrapDecrypter(alg, h, key, keysize)
 	case jwa.ECDH_ES, jwa.ECDH_ES_A128KW, jwa.ECDH_ES_A192KW, jwa.ECDH_ES_A256KW:
 		return buildECDHESDecrypter(alg, h, key)
+	case jwa.ECMR:
+		return buildECMRDecrypter(alg, h, key)
 	}
 
 	return nil, errors.Errorf(`unsupported algorithm for key decryption (%s)`, alg)
