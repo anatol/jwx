@@ -175,11 +175,14 @@ func (k ecdsaPrivateKey) Thumbprint(hash crypto.Hash) ([]byte, error) {
 	if err := k.Raw(&key); err != nil {
 		return nil, errors.Wrap(err, `failed to materialize ecdsa.PrivateKey for thumbprint generation`)
 	}
+
+	curveSize := curveSize(key.Curve)
+
 	return ecdsaThumbprint(
 		hash,
 		key.Curve.Params().Name,
-		base64.EncodeToString(key.X.Bytes()),
-		base64.EncodeToString(key.Y.Bytes()),
+		base64.EncodeToString(newFixedSizeBuffer(key.X.Bytes(), curveSize)),
+		base64.EncodeToString(newFixedSizeBuffer(key.Y.Bytes(), curveSize)),
 	), nil
 }
 
